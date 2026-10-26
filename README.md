@@ -461,6 +461,17 @@ uv run bandit -r . -c pyproject.toml
 uv run pytest tests/ --cov=.
 ```
 
+## 赞赏
+
+项目免费开源，适配平台改版、修 bug 都靠业余时间。
+如果它帮你把每天的签到省了，可以扫下面任意一个码请作者喝瓶水——金额随意，不打赏也完全不影响使用和后续更新。
+
+| 微信 | 支付宝 |
+|:---:|:---:|
+| <img src="assets/reward-wechat.png" width="240" alt="微信赞赏码"> | <img src="assets/reward-alipay.jpg" width="240" alt="支付宝收款码"> |
+
+两张码都是作者本人，收款页昵称显示为 `**志`，扫码后核对一下即可。
+
 ## 免责声明
 
 本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款.
