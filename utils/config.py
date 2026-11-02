@@ -199,6 +199,12 @@ class AccountConfig:
 
 BASE_ACCOUNTS_ENV = 'ANYROUTER_ACCOUNTS'
 EXTRA_ACCOUNTS_ENV = 'ANYROUTER_ACCOUNTS_EXTRA'
+# mlgb7 的会话 cookie 单独存一个环境变量/secret。
+# 理由：Linux DO 的 OAuth 会话会周期性过期（实测 9-01 建、10-31 掉），而
+# ANYROUTER_ACCOUNTS_EXTRA 里还塞着别的账号的邮箱密码 —— 为了换一条 cookie 就得
+# 整段重贴带密码的大 JSON，已经出过覆盖事故。拆出来以后只动这一个小值。
+MLGB7_COOKIE_ENV = 'MLGB7_COOKIE'
+MLGB7_COOKIE_NAME = 'chatgpt2api_session'
 
 
 def _parse_accounts_json(raw: str, source: str) -> list[dict] | None:
@@ -273,6 +279,66 @@ def _validate_account(account_dict: dict, index: int) -> bool:
 	return True
 
 
+def extract_cookie_value(raw: str, cookie_name: str = MLGB7_COOKIE_NAME) -> str:
+	"""把用户粘贴的内容归一成「cookie 的值」。
+
+	浏览器插件"复制 cookie"给出的往往是整段 JSON（`[{name, value, domain...}]`），
+	直接当值用会 401，而且报错信息完全指不到问题在哪。这里顺手吃掉三种写法：
+	  - 纯值                      FZ76...
+	  - name=value                chatgpt2api_session=FZ76...
+	  - 插件导出的 JSON 数组/对象  [{"name":"chatgpt2api_session","value":"FZ76..."}]
+
+	认不出来就原样返回，让请求自己报错，别在这里吞掉用户的值。
+	"""
+	text = (raw or '').strip()
+	if not text:
+		return ''
+
+	if text.startswith('[') or text.startswith('{'):
+		try:
+			data = json.loads(text)
+		except json.JSONDecodeError:
+			return text
+		items = data if isinstance(data, list) else [data]
+		for item in items:
+			if isinstance(item, dict) and item.get('name') == cookie_name and item.get('value'):
+				return str(item['value'])
+		return text
+
+	if text.startswith(f'{cookie_name}='):
+		return text.split('=', 1)[1].strip()
+
+	return text
+
+
+def apply_mlgb7_cookie_override(accounts: list[AccountConfig]) -> list[AccountConfig]:
+	"""用 MLGB7_COOKIE 覆盖 mlgb7 账号的会话 cookie（未设置则原样返回）。
+
+	覆盖后 EXTRA 里 mlgb7 的 cookies 可以一直留着旧值，不会影响签到。
+	"""
+	raw = (os.getenv(MLGB7_COOKIE_ENV) or '').strip()
+	if not raw:
+		return accounts
+
+	value = extract_cookie_value(raw)
+	if not value:
+		print(f'WARNING: {MLGB7_COOKIE_ENV} is set but empty after parsing, keeping existing cookies')
+		return accounts
+
+	hit = 0
+	for account in accounts:
+		if account.provider != 'mlgb7':
+			continue
+		account.cookies = {MLGB7_COOKIE_NAME: value}
+		hit += 1
+		print(f'[INFO] {account.name or account.provider}: {MLGB7_COOKIE_NAME} loaded from {MLGB7_COOKIE_ENV}')
+
+	if not hit:
+		print(f'WARNING: {MLGB7_COOKIE_ENV} is set but no mlgb7 account found, ignored')
+
+	return accounts
+
+
 def load_accounts_config() -> list[AccountConfig] | None:
 	"""从环境变量加载账号配置。
 
@@ -307,6 +373,9 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				return None
 
 			accounts.append(AccountConfig.from_dict(account_dict, i))
+
+		# 独立 secret 覆盖 mlgb7 的会话 cookie（未设置时保持 EXTRA 里的值）
+		apply_mlgb7_cookie_override(accounts)
 
 		return accounts
 	except Exception as e:

@@ -138,6 +138,9 @@ jobs:
         CHECKIN_WAIT_TIMEOUT_MS: 120000
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         ANYROUTER_ACCOUNTS_EXTRA: ${{ secrets.ANYROUTER_ACCOUNTS_EXTRA }}
+        # mlgb7 的 Linux DO 会话会周期性过期，单独一个 secret 存它，
+        # 换 cookie 时只动这一个短值，不用重贴带邮箱密码的 EXTRA。
+        MLGB7_COOKIE: ${{ secrets.MLGB7_COOKIE }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}

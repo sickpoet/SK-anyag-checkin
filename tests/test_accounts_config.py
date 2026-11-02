@@ -1,6 +1,6 @@
 import json
 
-from utils.config import load_accounts_config
+from utils.config import extract_cookie_value, load_accounts_config
 
 BASE_ACCOUNTS = [
 	{'name': 'any主帐号', 'cookies': {'session': 'base-session'}, 'api_user': '11111'},
@@ -8,9 +8,12 @@ BASE_ACCOUNTS = [
 	{'name': 'agGithub', 'cookies': {'session': 'stale-session'}, 'api_user': '33333'},
 ]
 
+MLGB_ACCOUNT = {'name': 'mlgb7', 'provider': 'mlgb7', 'api_user': 'mlgb7', 'cookies': {'chatgpt2api_session': 'old'}}
+
 
 def _set_env(monkeypatch, base=BASE_ACCOUNTS, extra=None):
 	monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps(base))
+	monkeypatch.delenv('MLGB7_COOKIE', raising=False)
 	if extra is None:
 		monkeypatch.delenv('ANYROUTER_ACCOUNTS_EXTRA', raising=False)
 	else:
@@ -112,3 +115,89 @@ def test_missing_base_env_returns_none(monkeypatch):
 	monkeypatch.setenv('ANYROUTER_ACCOUNTS_EXTRA', json.dumps([{'name': 'x', 'cookies': {'a': 'b'}}]))
 
 	assert load_accounts_config() is None
+
+
+# --- MLGB7_COOKIE：把 mlgb7 的会话 cookie 拆成独立 secret ------------------------
+
+
+def test_mlgb7_cookie_overrides_extra_value(monkeypatch):
+	"""换 cookie 时只改 MLGB7_COOKIE，EXTRA 里留着旧值也不影响签到。"""
+	_set_env(monkeypatch, extra=[MLGB_ACCOUNT])
+	monkeypatch.setenv('MLGB7_COOKIE', 'fresh-session')
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	mlgb = accounts[3]
+	assert mlgb.provider == 'mlgb7'
+	assert mlgb.cookies == {'chatgpt2api_session': 'fresh-session'}
+
+
+def test_mlgb7_cookie_unset_keeps_extra_cookies(monkeypatch):
+	_set_env(monkeypatch, extra=[MLGB_ACCOUNT])
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert accounts[3].cookies == {'chatgpt2api_session': 'old'}
+
+
+def test_mlgb7_cookie_does_not_touch_other_accounts(monkeypatch):
+	_set_env(monkeypatch, extra=[MLGB_ACCOUNT])
+	monkeypatch.setenv('MLGB7_COOKIE', 'fresh-session')
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert accounts[0].cookies == {'session': 'base-session'}
+	assert accounts[1].cookies == {'session': 'ld-session'}
+	assert accounts[2].cookies == {'session': 'stale-session'}
+
+
+def test_mlgb7_cookie_accepts_dotcom_browser_plugin_json(monkeypatch):
+	"""插件"复制 cookie"给的是整段 JSON，原样塞进 secret 也要能用。"""
+	_set_env(monkeypatch, extra=[MLGB_ACCOUNT])
+	monkeypatch.setenv(
+		'MLGB7_COOKIE',
+		json.dumps(
+			[
+				{
+					'domain': 'image.mlgb7.com',
+					'hostOnly': True,
+					'httpOnly': True,
+					'name': 'chatgpt2api_session',
+					'path': '/',
+					'value': 'from-json',
+				}
+			]
+		),
+	)
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert accounts[3].cookies == {'chatgpt2api_session': 'from-json'}
+
+
+def test_mlgb7_cookie_env_unused_when_no_mlgb7_account(monkeypatch):
+	_set_env(monkeypatch)
+	monkeypatch.setenv('MLGB7_COOKIE', 'fresh-session')
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert len(accounts) == 3
+
+
+def test_extract_cookie_value_forms():
+	assert extract_cookie_value('FZ76abc') == 'FZ76abc'
+	assert extract_cookie_value('  FZ76abc  ') == 'FZ76abc'
+	assert extract_cookie_value('chatgpt2api_session=FZ76abc') == 'FZ76abc'
+	assert extract_cookie_value('[{"name":"chatgpt2api_session","value":"FZ76abc"}]') == 'FZ76abc'
+	assert extract_cookie_value('') == ''
+
+
+def test_extract_cookie_value_keeps_unrecognised_input():
+	"""认不出来就原样返回，别把用户的值悄悄吃掉。"""
+	assert extract_cookie_value('[{"name":"other","value":"x"}]') == '[{"name":"other","value":"x"}]'
+	assert extract_cookie_value('[not json') == '[not json'
