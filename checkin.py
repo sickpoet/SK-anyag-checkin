@@ -387,35 +387,66 @@ async def login_with_credentials(
 		return None
 
 
+def _looks_like_waf_challenge(response) -> bool:
+	"""判断响应是不是 CDN/WAF 的挑战页，而不是业务 JSON。
+
+	anyrouter.top 现在挂在阿里云 ESA 后面：客户端 TLS 指纹不像浏览器时，
+	/api 请求会被 `X-Tengine-Error: denied by http_custom` 拒掉 —— 状态码仍是 200，
+	body 换成 `acw_sc__v2` 的 JS 挑战脚本。此时抓 .json() 只会得到一句
+	"Expecting value: line 1 column 1"，完全指不到真正的原因。
+	"""
+	content_type = (response.headers.get('content-type') or '').lower()
+	if 'text/html' not in content_type:
+		return False
+	text = (response.text or '')[:4000].lower()
+	return 'acw_sc' in text or '<html' in text
+
+
+def _interpret_user_info_payload(status_code: int, text: str) -> dict:
+	"""把 /api/user/self 的响应（httpx 或浏览器取回的 body）解析成统一结构。"""
+	if status_code != 200:
+		return {'success': False, 'error': f'Failed to get user info: HTTP {status_code}'}
+
+	try:
+		data = json.loads(text)
+	except json.JSONDecodeError:
+		return {'success': False, 'error': 'Failed to get user info: 响应不是有效 JSON'}
+
+	if not data.get('success'):
+		return {'success': False, 'error': f'Failed to get user info: HTTP {status_code}'}
+
+	user_data = data.get('data', {})
+	quota = round(user_data.get('quota', 0) / 500000, 2)
+	used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+
+	# NewAPI 会在 /api/user/self 里给出账号所属分组（不同分组计费/可用模型不同），
+	# 顺便读出来。字段缺失时把可用字段名打出来，方便排查不同部署的差异。
+	group = user_data.get('group')
+	display = f':money: Current balance: ${quota}, Used: ${used_quota}'
+	if group:
+		display += f' | group: {group}'
+	else:
+		print(f'[WARN] /api/user/self 没有 group 字段，可用字段: {sorted(user_data.keys())}')
+
+	return {
+		'success': True,
+		'quota': quota,
+		'used_quota': used_quota,
+		'group': group,
+		'display': display,
+	}
+
+
 def get_user_info(client, headers, user_info_url: str):
 	"""获取用户信息"""
 	try:
 		response = client.get(user_info_url, headers=headers, timeout=30)
 
-		if response.status_code == 200:
-			data = response.json()
-			if data.get('success'):
-				user_data = data.get('data', {})
-				quota = round(user_data.get('quota', 0) / 500000, 2)
-				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+		if _looks_like_waf_challenge(response):
+			print(f'[WARN] {user_info_url}: 返回 CDN 挑战页（不是业务 JSON），需要改用浏览器发请求')
+			return {'success': False, 'waf_challenge': True, 'error': '被 CDN 挑战拦截'}
 
-				# NewAPI 会在 /api/user/self 里给出账号所属分组（不同分组计费/可用模型不同），
-				# 顺便读出来。字段缺失时把可用字段名打出来，方便排查不同部署的差异。
-				group = user_data.get('group')
-				display = f':money: Current balance: ${quota}, Used: ${used_quota}'
-				if group:
-					display += f' | group: {group}'
-				else:
-					print(f'[WARN] /api/user/self 没有 group 字段，可用字段: {sorted(user_data.keys())}')
-
-				return {
-					'success': True,
-					'quota': quota,
-					'used_quota': used_quota,
-					'group': group,
-					'display': display,
-				}
-		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+		return _interpret_user_info_payload(response.status_code, response.text)
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
 
@@ -441,26 +472,16 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	return {**waf_cookies, **user_cookies}
 
 
-def execute_check_in(client, account_name: str, provider_config, headers: dict) -> CheckInOutcome:
-	"""执行签到请求，返回区分「签到成功」与「今日已签到」的结果。"""
-	print(f'[NETWORK] {account_name}: Executing check-in')
-
-	checkin_headers = headers.copy()
-	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
-
-	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
-	response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
-
-	print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
-
-	if response.status_code != 200:
-		print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
-		return CheckInOutcome(STATUS_FAILED, f'HTTP {response.status_code}')
+def _interpret_check_in_payload(status_code: int, text: str, account_name: str) -> CheckInOutcome:
+	"""把签到接口的响应（httpx 或浏览器取回的 body）解析成统一结果。"""
+	if status_code != 200:
+		print(f'[FAILED] {account_name}: Check-in failed - HTTP {status_code}')
+		return CheckInOutcome(STATUS_FAILED, f'HTTP {status_code}')
 
 	try:
-		result = response.json()
+		result = json.loads(text)
 	except json.JSONDecodeError:
-		if 'success' in response.text.lower():
+		if 'success' in text.lower():
 			print(f'[SUCCESS] {account_name}: Check-in successful!')
 			return CheckInOutcome(STATUS_CHECKED_IN)
 		print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
@@ -478,6 +499,21 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict) 
 
 	print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
 	return CheckInOutcome(STATUS_FAILED, str(error_msg))
+
+
+def execute_check_in(client, account_name: str, provider_config, headers: dict) -> CheckInOutcome:
+	"""执行签到请求，返回区分「签到成功」与「今日已签到」的结果。"""
+	print(f'[NETWORK] {account_name}: Executing check-in')
+
+	checkin_headers = headers.copy()
+	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
+
+	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
+	response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
+
+	print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
+
+	return _interpret_check_in_payload(response.status_code, response.text, account_name)
 
 
 def short_day(day: str | None) -> str:
@@ -640,13 +676,24 @@ async def check_in_account(
 
 	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
 
-	return run_check_in_requests(
+	result = run_check_in_requests(
 		all_cookies,
 		account,
 		account_name,
 		provider_config,
 		api_user_override=resolved_api_user,
 		use_proxy=provider_config.use_proxy,
+	)
+	if result is not None:
+		return result
+
+	# httpx 被 CDN 按客户端指纹拦下：同样的请求改由浏览器发出
+	return await run_check_in_with_browser_requests(
+		account,
+		account_name,
+		provider_config,
+		all_cookies,
+		api_user_override=resolved_api_user,
 	)
 
 
@@ -658,8 +705,11 @@ def run_check_in_requests(
 	*,
 	api_user_override: str | None = None,
 	use_proxy: bool = False,
-) -> tuple[CheckInOutcome, dict | None, dict | None]:
-	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
+) -> tuple[CheckInOutcome, dict | None, dict | None] | None:
+	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。
+
+	返回 None 表示 httpx 被 CDN/WAF 的客户端指纹校验拦下，需要改用浏览器重发。
+	"""
 	try:
 		client_kwargs: dict = {'http2': True, 'timeout': 30.0}
 		proxy_url = get_proxy_server(use_proxy=use_proxy)
@@ -694,6 +744,13 @@ def run_check_in_requests(
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			user_info_before = get_user_info(client, headers, user_info_url)
+
+			# 被 CDN 挑战挡掉时不要继续：POST 签到一样会被拦，重试只会白烧时间。
+			# 返回 None 让上层改用浏览器发请求。
+			if user_info_before and user_info_before.get('waf_challenge'):
+				print(f'[WARN] {account_name}: 检测到 CDN 挑战拦截，改用浏览器发签到请求')
+				return None
+
 			if user_info_before and user_info_before.get('success'):
 				print(user_info_before['display'])
 			elif user_info_before:
@@ -715,6 +772,112 @@ def run_check_in_requests(
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
 		return CheckInOutcome(STATUS_FAILED, str(e)[:50]), None, None
+
+
+# 在页面里发请求：请求由 Chromium 网络栈发出，TLS 指纹、UA、cookie 与真实浏览器一致。
+# 这是绕过「HTTP 客户端被 CDN 拒绝」唯一可靠的路子 —— Playwright 自己的
+# page.request / context.request 走的是它独立的 HTTP 栈，指纹照样不像浏览器。
+_BROWSER_FETCH_JS = """async ({ path, method, body, headers }) => {
+	const init = { method, credentials: 'include', headers: { ...headers } };
+	if (body !== null && body !== undefined) {
+		init.body = JSON.stringify(body);
+	}
+	const response = await fetch(path, init);
+	const text = await response.text();
+	return {
+		status: response.status,
+		contentType: response.headers.get('content-type') || '',
+		text,
+	};
+}"""
+
+
+async def _browser_request(page, path: str, *, method: str = 'GET', headers: dict | None = None) -> dict:
+	"""在页面内发起同源请求，返回 {status, contentType, text}。"""
+	return await page.evaluate(
+		_BROWSER_FETCH_JS,
+		{'path': path, 'method': method, 'body': None, 'headers': headers or {}},
+	)
+
+
+async def run_check_in_with_browser_requests(
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+	all_cookies: dict,
+	*,
+	api_user_override: str | None = None,
+) -> tuple[CheckInOutcome, dict | None, dict | None]:
+	"""在浏览器页面里完成签到（httpx 被 CDN 按客户端指纹拦掉时的兜底）。
+
+	WAF cookie 不预先注入 —— 由浏览器自己的挑战流程生成，塞旧值反而可能冲突。
+	"""
+	launch_kwargs: dict = {'headless': True}
+	proxy = get_playwright_proxy(use_proxy=provider_config.use_proxy)
+	if proxy:
+		launch_kwargs['proxy'] = proxy
+
+	waf_names = set(provider_config.waf_cookie_names or [])
+	session_cookies = [
+		{'name': name, 'value': value, 'url': provider_config.domain}
+		for name, value in all_cookies.items()
+		if name not in waf_names
+	]
+
+	api_user = api_user_override or account.api_user
+	extra_headers: dict = {}
+	if api_user:
+		extra_headers[provider_config.api_user_key] = api_user
+
+	browser = await launch_async(**launch_kwargs)
+	try:
+		page = await browser.new_page()
+		await prepare_browser_page(page)
+
+		print(f'[PROCESSING] {account_name}: 启动浏览器发签到请求（复用浏览器指纹）...')
+		await page.goto(f'{provider_config.domain}/', wait_until='domcontentloaded', timeout=60_000)
+		await wait_for_waf_ready(page)
+
+		if session_cookies:
+			await page.context.add_cookies(session_cookies)
+
+		before = await _browser_request(page, provider_config.user_info_path, headers=extra_headers)
+		user_info_before = _interpret_user_info_payload(before['status'], before['text'])
+		if user_info_before.get('success'):
+			print(user_info_before['display'])
+		else:
+			print(user_info_before.get('error', 'Unknown error'))
+			# 401 = 注入的会话 cookie 无效，再 POST 签到也只会拿到 401
+			if 'HTTP 401' in str(user_info_before.get('error', '')):
+				return CheckInOutcome(STATUS_FAILED, '会话 cookie 已失效（HTTP 401）'), None, user_info_before
+
+		if provider_config.needs_manual_check_in():
+			print(f'[NETWORK] {account_name}: Executing check-in (browser)')
+			sign_in_headers = dict(extra_headers)
+			sign_in_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
+			signed = await _browser_request(
+				page, provider_config.sign_in_path, method='POST', headers=sign_in_headers
+			)
+			print(f'[RESPONSE] {account_name}: Response status code {signed["status"]}')
+			outcome = _interpret_check_in_payload(signed['status'], signed['text'], account_name)
+			after = await _browser_request(page, provider_config.user_info_path, headers=extra_headers)
+			return outcome, user_info_before, _interpret_user_info_payload(after['status'], after['text'])
+
+		after = await _browser_request(page, provider_config.user_info_path, headers=extra_headers)
+		user_info_after = _interpret_user_info_payload(after['status'], after['text'])
+		if user_info_after.get('success'):
+			print(f'[INFO] {account_name}: Logged in and user info fetched (this provider credits on login)')
+			return CheckInOutcome(STATUS_LOGGED_IN), user_info_before, user_info_after
+
+		error = user_info_after.get('error', 'Unknown error')
+		print(f'[FAILED] {account_name}: Login/user-info failed - {error}')
+		return CheckInOutcome(STATUS_FAILED, str(error)), user_info_before, user_info_after
+
+	except Exception as e:
+		print(f'[FAILED] {account_name}: 浏览器签到失败 - {str(e)[:80]}')
+		return CheckInOutcome(STATUS_FAILED, f'浏览器签到失败: {str(e)[:50]}'), None, None
+	finally:
+		await browser.close()
 
 
 def filter_accounts_by_provider(
