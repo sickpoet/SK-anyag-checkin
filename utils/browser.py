@@ -314,7 +314,9 @@ async def _settle_page(page: Page, delay_seconds: float, networkidle_timeout_ms:
 
 
 async def _wait_for_login_shell(page: Page, timeout_ms: int) -> bool:
-	shell_timeout = min(timeout_ms, 60_000)
+	# 实测 11-11 那次 agLD 登录花了 1 分 52 秒才把 SPA 挂起来，
+	# 60 秒的上限本来就贴着红线，代理节点一慢就必然误判成「页面没渲染」。
+	shell_timeout = min(timeout_ms, 90_000)
 	try:
 		await page.wait_for_function(_LOGIN_SHELL_READY_JS, timeout=shell_timeout)
 		return True
@@ -635,7 +637,9 @@ async def _log_login_page_state(page: Page) -> None:
 			};
 		}"""
 	)
-	debug_print(f'[INFO] Login page state: {state}')
+	# 这条是失败现场唯一的证据，不能藏在 DEBUG 开关后面：
+	# 页面是白屏、被 WAF 挑战拦下、还是渲染慢，只差这一行就能分开。
+	print(f'[WARN] Login page state: {state}')
 
 
 async def _open_email_login_form(
