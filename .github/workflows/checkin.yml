@@ -141,6 +141,8 @@ jobs:
         # mlgb7 的 Linux DO 会话会周期性过期，单独一个 secret 存它，
         # 换 cookie 时只动这一个短值，不用重贴带邮箱密码的 EXTRA。
         MLGB7_COOKIE: ${{ secrets.MLGB7_COOKIE }}
+        # anyrouter 主帐号没有站内密码，只能 session cookie 登录，同样拆出来。
+        ANY_COOKIE: ${{ secrets.ANY_COOKIE }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}

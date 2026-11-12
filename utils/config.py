@@ -205,6 +205,31 @@ EXTRA_ACCOUNTS_ENV = 'ANYROUTER_ACCOUNTS_EXTRA'
 # 整段重贴带密码的大 JSON，已经出过覆盖事故。拆出来以后只动这一个小值。
 MLGB7_COOKIE_ENV = 'MLGB7_COOKIE'
 MLGB7_COOKIE_NAME = 'chatgpt2api_session'
+# anyrouter 主帐号同理：它没有站内密码，只能 session cookie 登录，
+# 而 EXTRA 里同时塞着 agLD / agGithub 的邮箱密码。cookie 一过期就得整段重贴，
+# 拆成 ANY_COOKIE 之后换号只动这一个值。
+ANY_COOKIE_ENV = 'ANY_COOKIE'
+ANY_COOKIE_NAME = 'session'
+
+
+@dataclass(frozen=True)
+class SessionCookieOverride:
+	"""把某个账号的会话 cookie 从账号大 JSON 里拆出来单独存。
+
+	account_name 优先于 provider：anyrouter 这个 provider 下不止一张号，
+	按 provider 匹配会把别人的 session 一起覆盖掉。
+	"""
+
+	env_name: str
+	cookie_name: str
+	provider: str | None = None
+	account_name: str | None = None
+
+
+SESSION_COOKIE_OVERRIDES: tuple[SessionCookieOverride, ...] = (
+	SessionCookieOverride(env_name=MLGB7_COOKIE_ENV, cookie_name=MLGB7_COOKIE_NAME, provider='mlgb7'),
+	SessionCookieOverride(env_name=ANY_COOKIE_ENV, cookie_name=ANY_COOKIE_NAME, account_name='any主帐号'),
+)
 
 
 def _parse_accounts_json(raw: str, source: str) -> list[dict] | None:
@@ -311,30 +336,39 @@ def extract_cookie_value(raw: str, cookie_name: str = MLGB7_COOKIE_NAME) -> str:
 	return text
 
 
-def apply_mlgb7_cookie_override(accounts: list[AccountConfig]) -> list[AccountConfig]:
-	"""用 MLGB7_COOKIE 覆盖 mlgb7 账号的会话 cookie（未设置则原样返回）。
+def _matches_override(account: AccountConfig, spec: SessionCookieOverride) -> bool:
+	if spec.account_name:
+		return account.name == spec.account_name
+	if spec.provider:
+		return account.provider == spec.provider
+	return False
 
-	覆盖后 EXTRA 里 mlgb7 的 cookies 可以一直留着旧值，不会影响签到。
+
+def apply_session_cookie_overrides(accounts: list[AccountConfig]) -> list[AccountConfig]:
+	"""用独立 secret 覆盖会话 cookie（对应 secret 未设置时原样返回）。
+
+	覆盖后 EXTRA 里对应账号的 cookies 可以一直留着旧值，不会影响签到。
 	"""
-	raw = (os.getenv(MLGB7_COOKIE_ENV) or '').strip()
-	if not raw:
-		return accounts
-
-	value = extract_cookie_value(raw)
-	if not value:
-		print(f'WARNING: {MLGB7_COOKIE_ENV} is set but empty after parsing, keeping existing cookies')
-		return accounts
-
-	hit = 0
-	for account in accounts:
-		if account.provider != 'mlgb7':
+	for spec in SESSION_COOKIE_OVERRIDES:
+		raw = (os.getenv(spec.env_name) or '').strip()
+		if not raw:
 			continue
-		account.cookies = {MLGB7_COOKIE_NAME: value}
-		hit += 1
-		print(f'[INFO] {account.name or account.provider}: {MLGB7_COOKIE_NAME} loaded from {MLGB7_COOKIE_ENV}')
 
-	if not hit:
-		print(f'WARNING: {MLGB7_COOKIE_ENV} is set but no mlgb7 account found, ignored')
+		value = extract_cookie_value(raw, spec.cookie_name)
+		if not value:
+			print(f'WARNING: {spec.env_name} is set but empty after parsing, keeping existing cookies')
+			continue
+
+		hit = 0
+		for account in accounts:
+			if not _matches_override(account, spec):
+				continue
+			account.cookies = {spec.cookie_name: value}
+			hit += 1
+			print(f'[INFO] {account.name or account.provider}: {spec.cookie_name} loaded from {spec.env_name}')
+
+		if not hit:
+			print(f'WARNING: {spec.env_name} is set but no matching account found, ignored')
 
 	return accounts
 
@@ -374,8 +408,8 @@ def load_accounts_config() -> list[AccountConfig] | None:
 
 			accounts.append(AccountConfig.from_dict(account_dict, i))
 
-		# 独立 secret 覆盖 mlgb7 的会话 cookie（未设置时保持 EXTRA 里的值）
-		apply_mlgb7_cookie_override(accounts)
+		# 独立 secret 覆盖会话 cookie（未设置时保持 EXTRA 里的值）
+		apply_session_cookie_overrides(accounts)
 
 		return accounts
 	except Exception as e:

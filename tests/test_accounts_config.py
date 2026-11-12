@@ -14,6 +14,7 @@ MLGB_ACCOUNT = {'name': 'mlgb7', 'provider': 'mlgb7', 'api_user': 'mlgb7', 'cook
 def _set_env(monkeypatch, base=BASE_ACCOUNTS, extra=None):
 	monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps(base))
 	monkeypatch.delenv('MLGB7_COOKIE', raising=False)
+	monkeypatch.delenv('ANY_COOKIE', raising=False)
 	if extra is None:
 		monkeypatch.delenv('ANYROUTER_ACCOUNTS_EXTRA', raising=False)
 	else:
@@ -187,6 +188,50 @@ def test_mlgb7_cookie_env_unused_when_no_mlgb7_account(monkeypatch):
 
 	assert accounts is not None
 	assert len(accounts) == 3
+
+
+def test_any_cookie_overrides_only_the_named_account(monkeypatch):
+	"""ANY_COOKIE 只改 any主帐号：agGithub 同样是 anyrouter provider，不能被连带覆盖。"""
+	_set_env(monkeypatch)
+	monkeypatch.setenv('ANY_COOKIE', 'fresh-any-session')
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert accounts[0].cookies == {'session': 'fresh-any-session'}
+	assert accounts[2].cookies == {'session': 'stale-session'}
+
+
+def test_any_cookie_unset_keeps_extra_cookies(monkeypatch):
+	_set_env(monkeypatch)
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert accounts[0].cookies == {'session': 'base-session'}
+
+
+def test_any_cookie_accepts_name_value_and_plugin_json(monkeypatch):
+	_set_env(monkeypatch)
+	monkeypatch.setenv('ANY_COOKIE', 'session=pasted-value')
+	assert load_accounts_config()[0].cookies == {'session': 'pasted-value'}
+
+	monkeypatch.setenv(
+		'ANY_COOKIE',
+		json.dumps([{'domain': 'anyrouter.top', 'name': 'session', 'value': 'json-value', 'path': '/'}]),
+	)
+	assert load_accounts_config()[0].cookies == {'session': 'json-value'}
+
+
+def test_any_cookie_env_unused_when_no_matching_account(monkeypatch):
+	_set_env(monkeypatch, base=[BASE_ACCOUNTS[1]])
+	monkeypatch.setenv('ANY_COOKIE', 'fresh-any-session')
+
+	accounts = load_accounts_config()
+
+	assert accounts is not None
+	assert len(accounts) == 1
+	assert accounts[0].cookies == {'session': 'ld-session'}
 
 
 def test_extract_cookie_value_forms():
