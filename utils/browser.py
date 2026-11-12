@@ -48,6 +48,13 @@ USER_SELF_API_SUFFIX = '/api/user/self'
 CONSOLE_PATH = '/console'
 DEFAULT_SCREENSHOT_DIR = 'checkin_screenshots'
 DEFAULT_TIMEOUT_MS = 60_000
+# 单次 page.goto 的上限。导航本身不需要 2 分钟，卡住就是节点不通，
+# 早失败早重试比干等更划算。
+NAV_TIMEOUT_MS = 90_000
+# 等 SPA 把登录表单挂出来的上限。这是真正容易误判的一环：
+# 实测 11-11 那次 agLD 花了 1 分 52 秒才渲染完成，60 秒必然把它判死。
+# 与 workflow 里的 CHECKIN_WAIT_TIMEOUT_MS（120000）对齐。
+LOGIN_SHELL_TIMEOUT_MS = 120_000
 _pending_notify_screenshots: list[Path] = []
 FORM_ACTION_TIMEOUT_MS = 15_000
 EMAIL_TAB_TIMEOUT_MS = 8_000
@@ -314,9 +321,8 @@ async def _settle_page(page: Page, delay_seconds: float, networkidle_timeout_ms:
 
 
 async def _wait_for_login_shell(page: Page, timeout_ms: int) -> bool:
-	# 实测 11-11 那次 agLD 登录花了 1 分 52 秒才把 SPA 挂起来，
-	# 60 秒的上限本来就贴着红线，代理节点一慢就必然误判成「页面没渲染」。
-	shell_timeout = min(timeout_ms, 90_000)
+	# 上限跟 LOGIN_SHELL_TIMEOUT_MS 走，不再和 goto 的 NAV_TIMEOUT_MS 共用预算。
+	shell_timeout = min(timeout_ms, LOGIN_SHELL_TIMEOUT_MS)
 	try:
 		await page.wait_for_function(_LOGIN_SHELL_READY_JS, timeout=shell_timeout)
 		return True
@@ -337,7 +343,7 @@ async def navigate_login_page(
 
 	parsed = urlparse(login_url)
 	base_url = f'{parsed.scheme}://{parsed.netloc}/'
-	attempt_timeout = min(timeout_ms, 60_000)
+	attempt_timeout = min(timeout_ms, NAV_TIMEOUT_MS)
 
 	try:
 		print(f'[INFO] Warming up {base_url} before login')
@@ -354,7 +360,8 @@ async def navigate_login_page(
 		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 5, 20_000)
 
-		if await _wait_for_login_shell(page, attempt_timeout):
+		# shell 等待单独给足预算：goto 成功只代表 HTML 到手，SPA 还要渲染。
+		if await _wait_for_login_shell(page, timeout_ms):
 			await wait_for_site_ready(page, timeout_ms)
 			if await page.evaluate(_LOGIN_SHELL_READY_JS):
 				return
@@ -450,7 +457,7 @@ async def _capture_user_profile(page: Page, console_url: str, timeout_ms: int) -
 
 	page.on('response', on_response)
 	try:
-		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, 60_000))
+		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, NAV_TIMEOUT_MS))
 		try:
 			await page.wait_for_load_state('networkidle', timeout=20_000)
 		except Exception:  # nosec B110
