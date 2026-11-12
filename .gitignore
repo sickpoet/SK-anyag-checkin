@@ -8,6 +8,8 @@ __pycache__
 .coverage
 coverage.xml
 htmlcov
+# 本地跑 pytest 时把 TMPDIR 指到这里，避免 tmp_path 撞 Windows 权限问题
+.tmp
 balance_hash.txt
 .browser_profiles
 checkin_screenshots
