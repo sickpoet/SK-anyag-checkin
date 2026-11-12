@@ -5,7 +5,10 @@ description = "Anyrouter or newapi system check in"
 requires-python = ">=3.11"
 dependencies = [
   "httpx[http2]>=0.24.0",
-  "cloakbrowser>=0.3.0",
+  # 上限不要去掉：0.4.0 起 CloakBrowser 引入了 license 校验，没有 key 时
+  # 在非交互终端（CI）会直接 raise，不会退回旧二进制 —— 浏览器相关路径全挂。
+  # 0.3.32 是最后一个免 key 版本。
+  "cloakbrowser>=0.3.32,<0.4.0",
   "python-dotenv>=1.0.0"
 ]
 
