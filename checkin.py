@@ -405,6 +405,10 @@ def _looks_like_waf_challenge(response) -> bool:
 def _interpret_user_info_payload(status_code: int, text: str) -> dict:
 	"""把 /api/user/self 的响应（httpx 或浏览器取回的 body）解析成统一结构。"""
 	if status_code != 200:
+		# 401 / 403 的单靠状态码分不清是「会话过期」还是「new-api-user 头指向了别人」，
+		# 把服务端的 message 摘出来，省得每次都要猜。响应体不含凭据。
+		snippet = (text or '')[:200].replace('\n', ' ')
+		print(f'[DEBUG] /api/user/self HTTP {status_code} 响应: {snippet}')
 		return {'success': False, 'error': f'Failed to get user info: HTTP {status_code}'}
 
 	try:
@@ -475,6 +479,8 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 def _interpret_check_in_payload(status_code: int, text: str, account_name: str) -> CheckInOutcome:
 	"""把签到接口的响应（httpx 或浏览器取回的 body）解析成统一结果。"""
 	if status_code != 200:
+		snippet = (text or '')[:200].replace('\n', ' ')
+		print(f'[DEBUG] 签到接口 HTTP {status_code} 响应: {snippet}')
 		print(f'[FAILED] {account_name}: Check-in failed - HTTP {status_code}')
 		return CheckInOutcome(STATUS_FAILED, f'HTTP {status_code}')
 
