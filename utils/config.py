@@ -3,6 +3,7 @@
 配置管理模块
 """
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -360,6 +361,11 @@ def apply_session_cookie_overrides(accounts: list[AccountConfig]) -> list[Accoun
 			continue
 
 		hit = 0
+		# 只打长度和哈希前 12 位：用来确认线上跑的到底是哪一份 cookie，
+		# 又不会把凭据本身写进公开仓库的 Actions 日志。
+		print(
+			f'[DEBUG] {spec.env_name}: {spec.cookie_name} 长度 {len(value)} 指纹 {hashlib.sha256(value.encode()).hexdigest()[:12]}'
+		)
 		for account in accounts:
 			if not _matches_override(account, spec):
 				continue
